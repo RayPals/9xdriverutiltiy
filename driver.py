@@ -1,20 +1,14 @@
-# win9x_driver_installer_driverscollection.py
-# Requires Python 2.5.4 with ctypes (bundled), urlmon.dll (IE), and a CAB extractor (e.g. extract.exe) in PATH.
+# -*- coding: utf-8 -*-
+import ctypes, os, sys, re, zipfile, urllib
 
-import ctypes, os, sys, re, zipfile
-
-# --- Configuration ---
-# Search URL template (we’ll append ?H=<HWID>)
+# Configuration
 SEARCH_URL_BASE = "https://driverscollection.com/?H="
-# You may optionally add "&By=VendorName" if you parse vendor separately.
-
-# Where to save temp HTML and downloaded archives/INFs
-WINDIR = os.environ.get('WINDIR', r'C:\Windows')
-INF_DIR = os.path.join(WINDIR, 'Inf')
+WINDIR          = os.environ.get('WINDIR', r'C:\Windows')
+INF_DIR         = os.path.join(WINDIR, 'Inf')
 TMP_SEARCH_HTML = os.path.join(INF_DIR, 'search.html')
 TMP_PAGE_HTML   = os.path.join(INF_DIR, 'driverpage.html')
 
-# --- Win9x API constants ---
+# Win9x API constants
 CM_LOCATE_DEVNODE_NORMAL = 0x00000000
 CM_DRP_HARDWAREID        = 0x00000001
 CR_SUCCESS               = 0x00000000
@@ -25,7 +19,13 @@ urlmon = ctypes.windll.urlmon
 
 def fetch_url_to_file(url, local_path):
     """Download a URL to a file using URLDownloadToFileA."""
-    # URLDownloadToFileA(NULL, url, local_path, 0, NULL)
+    # Ensure target directory exists
+    d = os.path.dirname(local_path)
+    if not os.path.isdir(d):
+        try:
+            os.makedirs(d)
+        except Exception:
+            pass
     hr = urlmon.URLDownloadToFileA(
         None,
         ctypes.c_char_p(url),
@@ -44,7 +44,7 @@ def enum_hwids():
         return ids
 
     def walk(node):
-        # First query buffer size
+        # Query needed buffer size
         needed = ctypes.c_ulong(0)
         cfgmgr.CM_Get_DevNode_Registry_PropertyA(
             node, CM_DRP_HARDWAREID,
@@ -72,36 +72,50 @@ def enum_hwids():
             walk(sib)
 
     walk(root)
-    # Deduplicate
     return list(set(ids))
 
 def find_driver_page(hwid):
-    """Search DriversCollection.com for hwid, return the URL of the driver page or None."""
-    # URL‑encode spaces and special chars minimally:
-    query = hwid.replace(' ', '+')
+    """Search DriversCollection.com for hwid, return the driver page URL or None."""
+    query = urllib.quote(hwid, safe='')
     search_url = SEARCH_URL_BASE + query
+    print "DEBUG: querying URL:", search_url
     if not fetch_url_to_file(search_url, TMP_SEARCH_HTML):
+        print "    [!] Error downloading search page."
         return None
-
-    html = open(TMP_SEARCH_HTML, 'r').read()
-    m = re.search(r'href="(/\\?file_cid=[^"]+)"', html)
+    if not os.path.exists(TMP_SEARCH_HTML):
+        print "    [!] Search HTML missing; skipping."
+        return None
+    try:
+        html = open(TMP_SEARCH_HTML, 'r').read()
+    except IOError:
+        print "    [!] Cannot read search HTML; skipping."
+        return None
+    m = re.search(r'href="(/\?file_cid=[^"]+)"', html)
     if not m:
         return None
     return "https://driverscollection.com" + m.group(1)
 
 def get_direct_download_url(page_url):
-    """Fetch the driver page and extract the real download URL from a JS redirect."""
+    """Fetch the driver page and extract the real download URL."""
     if not fetch_url_to_file(page_url, TMP_PAGE_HTML):
+        print "    [!] Error downloading driver page."
         return None
-
-    html = open(TMP_PAGE_HTML, 'r').read()
-    # look for: location.href = "http://.../driver123.zip"
+    if not os.path.exists(TMP_PAGE_HTML):
+        print "    [!] Driver page HTML missing; skipping."
+        return None
+    try:
+        html = open(TMP_PAGE_HTML, 'r').read()
+    except IOError:
+        print "    [!] Cannot read driver page HTML; skipping."
+        return None
     m = re.search(r'location\.href\s*=\s*"([^"]+)"', html)
-    return m.group(1) if m else None
+    if not m:
+        return None
+    return m.group(1)
 
 def download_and_install(hwid):
     """Search, download archive, extract .INF, and install; returns True on success."""
-    print "  → Searching DriversCollection for", hwid
+    print "  -> Searching DriversCollection for", hwid
     page = find_driver_page(hwid)
     if not page:
         print "    [!] No entry found; skipping."
@@ -110,7 +124,7 @@ def download_and_install(hwid):
     print "    Found driver page:", page
     dl = get_direct_download_url(page)
     if not dl:
-        print "    [!] Could not parse direct download URL; skipping."
+        print "    [!] Could not parse download URL; skipping."
         return False
 
     print "    Direct download URL:", dl
@@ -138,13 +152,12 @@ def download_and_install(hwid):
             print "    [!] ZIP extraction error:", e
             return False
     else:
-        # Assume CAB: requires extract.exe (or EXPAND) in PATH
+        # Assume CAB: requires extract.exe or EXPAND.EXE in PATH
         print "    Extracting CAB using extract.exe"
         cmd = 'extract.exe "%s" "%s"' % (archive_path, INF_DIR)
         if os.system(cmd) != 0:
             print "    [!] CAB extraction failed."
             return False
-        # Assume INF named <hwid>.inf
         inf_path = os.path.join(INF_DIR, hwid + '.inf')
 
     if not inf_path or not os.path.exists(inf_path):
@@ -152,7 +165,6 @@ def download_and_install(hwid):
         return False
 
     print "    Installing INF:", inf_path
-    # DIF_DEFINSTALL = 132
     cmd = 'rundll32.exe setupapi,InstallHinfSection DefaultInstall 132 "%s"' % inf_path
     if os.system(cmd) != 0:
         print "    [!] Installation failed."
